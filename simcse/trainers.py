@@ -1,6 +1,5 @@
 import collections
 import math
-import sys
 import os
 import time
 import warnings
@@ -30,9 +29,8 @@ from transformers.trainer_pt_utils import (
 
 from transformers.utils import logging
 import torch
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Optional, Union
 from torch.utils.data.dataloader import DataLoader
-from torch.utils.data.dataset import Dataset
 from torch.utils.data.distributed import DistributedSampler
 
 if is_torch_tpu_available():
@@ -51,14 +49,6 @@ if is_datasets_available():
     import datasets
 
 from transformers.trainer import _model_unwrap
-
-# Set path to SentEval
-PATH_TO_SENTEVAL = './SentEval'
-PATH_TO_DATA = './SentEval/data'
-
-# Import SentEval
-sys.path.insert(0, PATH_TO_SENTEVAL)
-import senteval
 
 logger = logging.get_logger(__name__)
 
