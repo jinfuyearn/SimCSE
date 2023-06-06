@@ -557,22 +557,6 @@ def main():
             # Need to save the state, since Trainer.save_model saves only the tokenizer with the model
             trainer.state.save_to_json(os.path.join(training_args.output_dir, "trainer_state.json"))
 
-    # Evaluation
-    results = {}
-    if training_args.do_eval:
-        logger.info("*** Evaluate ***")
-        results = trainer.evaluate(eval_senteval_transfer=True)
-
-        output_eval_file = os.path.join(training_args.output_dir, "eval_results.txt")
-        if trainer.is_world_process_zero():
-            with open(output_eval_file, "w") as writer:
-                logger.info("***** Eval results *****")
-                for key, value in sorted(results.items()):
-                    logger.info(f"  {key} = {value}")
-                    writer.write(f"{key} = {value}\n")
-
-    return results
-
 
 def _mp_fn(index):
     # For xla_spawn (TPUs)
