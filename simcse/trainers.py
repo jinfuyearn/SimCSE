@@ -1,29 +1,17 @@
 import collections
-import inspect
 import math
 import sys
 import os
-import re
-import json
-import shutil
 import time
 import warnings
-from pathlib import Path
-import importlib.util
+import numpy as np
 from packaging import version
 from transformers import Trainer
 from transformers.modeling_utils import PreTrainedModel
-from transformers.training_args import ParallelMode, TrainingArguments
-from transformers.utils import logging
 from transformers.trainer_utils import (
     PREFIX_CHECKPOINT_DIR,
-    BestRun,
-    EvalPrediction,
     HPSearchBackend,
-    PredictionOutput,
     TrainOutput,
-    default_compute_objective,
-    default_hp_space,
     set_seed,
     speed_metrics,
 )
@@ -31,16 +19,9 @@ from transformers.file_utils import (
     WEIGHTS_NAME,
     is_apex_available,
     is_datasets_available,
-    is_in_notebook,
     is_torch_tpu_available,
 )
 from transformers.trainer_callback import (
-    CallbackHandler,
-    DefaultFlowCallback,
-    PrinterCallback,
-    ProgressCallback,
-    TrainerCallback,
-    TrainerControl,
     TrainerState,
 )
 from transformers.trainer_pt_utils import (
@@ -48,14 +29,11 @@ from transformers.trainer_pt_utils import (
 )
 
 from transformers.utils import logging
-from transformers.data.data_collator import DataCollator, DataCollatorWithPadding, default_data_collator
 import torch
-import torch.nn as nn
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.dataset import Dataset
 from torch.utils.data.distributed import DistributedSampler
-from torch.utils.data.sampler import RandomSampler, SequentialSampler
 
 if is_torch_tpu_available():
     import torch_xla.core.xla_model as xm
@@ -73,8 +51,7 @@ if is_datasets_available():
     import datasets
 
 from transformers.trainer import _model_unwrap
-from transformers.optimization import Adafactor, AdamW, get_scheduler
-import copy
+
 # Set path to SentEval
 PATH_TO_SENTEVAL = './SentEval'
 PATH_TO_DATA = './SentEval/data'
@@ -82,20 +59,18 @@ PATH_TO_DATA = './SentEval/data'
 # Import SentEval
 sys.path.insert(0, PATH_TO_SENTEVAL)
 import senteval
-import numpy as np
-from datetime import datetime
-from filelock import FileLock
 
 logger = logging.get_logger(__name__)
+
 
 class CLTrainer(Trainer):
 
     def evaluate(
-        self,
-        eval_dataset: Optional[Dataset] = None,
-        ignore_keys: Optional[List[str]] = None,
-        metric_key_prefix: str = "eval",
-        eval_senteval_transfer: bool = False,
+            self,
+            eval_dataset: Optional[Dataset] = None,
+            ignore_keys: Optional[List[str]] = None,
+            metric_key_prefix: str = "eval",
+            eval_senteval_transfer: bool = False,
     ) -> Dict[str, float]:
 
         # SentEval prepare and batcher
@@ -119,7 +94,7 @@ class CLTrainer(Trainer):
         # Set params for SentEval (fastmode)
         params = {'task_path': PATH_TO_DATA, 'usepytorch': True, 'kfold': 5}
         params['classifier'] = {'nhid': 0, 'optim': 'rmsprop', 'batch_size': 128,
-                                            'tenacity': 3, 'epoch_size': 2}
+                                'tenacity': 3, 'epoch_size': 2}
 
         se = senteval.engine.SE(params, batcher, prepare)
         tasks = ['STSBenchmark', 'SICKRelatedness']
@@ -127,11 +102,12 @@ class CLTrainer(Trainer):
             tasks = ['STSBenchmark', 'SICKRelatedness', 'MR', 'CR', 'SUBJ', 'MPQA', 'SST2', 'TREC', 'MRPC']
         self.model.eval()
         results = se.eval(tasks)
-        
+
         stsb_spearman = results['STSBenchmark']['dev']['spearman'][0]
         sickr_spearman = results['SICKRelatedness']['dev']['spearman'][0]
 
-        metrics = {"eval_stsb_spearman": stsb_spearman, "eval_sickr_spearman": sickr_spearman, "eval_avg_sts": (stsb_spearman + sickr_spearman) / 2} 
+        metrics = {"eval_stsb_spearman": stsb_spearman, "eval_sickr_spearman": sickr_spearman,
+                   "eval_avg_sts": (stsb_spearman + sickr_spearman) / 2}
         if eval_senteval_transfer or self.args.eval_transfer:
             avg_transfer = 0
             for task in ['MR', 'CR', 'SUBJ', 'MPQA', 'SST2', 'TREC', 'MRPC']:
@@ -142,7 +118,7 @@ class CLTrainer(Trainer):
 
         self.log(metrics)
         return metrics
-        
+
     def _save_checkpoint(self, model, trial, metrics=None):
         """
         Compared to original implementation, we change the saving policy to
@@ -150,7 +126,7 @@ class CLTrainer(Trainer):
         """
 
         # In all cases, including ddp/dp/deepspeed, self.model is always a reference to the model we
-        # want to save.
+        # want to save
         assert _model_unwrap(model) is self.model, "internal model should be a reference to self.model"
 
         # Determine the new best metric / best model checkpoint
@@ -162,9 +138,9 @@ class CLTrainer(Trainer):
 
             operator = np.greater if self.args.greater_is_better else np.less
             if (
-                self.state.best_metric is None
-                or self.state.best_model_checkpoint is None
-                or operator(metric_value, self.state.best_metric)
+                    self.state.best_metric is None
+                    or self.state.best_model_checkpoint is None
+                    or operator(metric_value, self.state.best_metric)
             ):
                 output_dir = self.args.output_dir
                 self.state.best_metric = metric_value
@@ -234,15 +210,14 @@ class CLTrainer(Trainer):
                     torch.save(self.lr_scheduler.state_dict(), os.path.join(output_dir, "scheduler.pt"))
                 reissue_pt_warnings(caught_warnings)
 
-
             # Save the Trainer state
             if self.is_world_process_zero():
                 self.state.save_to_json(os.path.join(output_dir, "trainer_state.json"))
 
-            # Maybe delete some older checkpoints.
+            # Maybe delete some older checkpoints
             if self.is_world_process_zero():
                 self._rotate_checkpoints(use_mtime=True)
-    
+
     def train(self, model_path: Optional[str] = None, trial: Union["optuna.Trial", Dict[str, Any]] = None):
         """
         Main training entry point.
@@ -253,16 +228,16 @@ class CLTrainer(Trainer):
                 training will resume from the optimizer/scheduler states loaded here.
             trial (:obj:`optuna.Trial` or :obj:`Dict[str, Any]`, `optional`):
                 The trial run or the hyperparameter dictionary for hyperparameter search.
-        
-        The main difference between ours and Huggingface's original implementation is that we 
+
+        The main difference between ours and Huggingface's original implementation is that we
         also load model_args when reloading best checkpoints for evaluation.
         """
-        # This might change the seed so needs to run first.
+        # This might change the seed so needs to run first
         self._hp_search_setup(trial)
 
         # Model re-init
         if self.model_init is not None:
-            # Seed must be set before instantiating the model when using model_init.
+            # Seed must be set before instantiating the model when using model_init
             set_seed(self.args.seed)
 
             model = self.call_model_init(trial)
@@ -277,7 +252,7 @@ class CLTrainer(Trainer):
 
         # Keeping track whether we can can len() on the dataset or not
         train_dataset_is_sized = isinstance(self.train_dataset, collections.abc.Sized)
-        
+
         # Data loader and number of training steps
         train_dataloader = self.get_train_dataloader()
 
@@ -353,14 +328,14 @@ class CLTrainer(Trainer):
         # self.model         is the Transformers Model
         # self.model_wrapped is DDP(Transformers Model), DDP(Deepspeed(Transformers Model)), etc.
 
-        # Train!
+        # Train
         if is_torch_tpu_available():
             total_train_batch_size = self.args.train_batch_size * xm.xrt_world_size()
         else:
             total_train_batch_size = (
-                self.args.train_batch_size
-                * self.args.gradient_accumulation_steps
-                * (torch.distributed.get_world_size() if self.args.local_rank != -1 else 1)
+                    self.args.train_batch_size
+                    * self.args.gradient_accumulation_steps
+                    * (torch.distributed.get_world_size() if self.args.local_rank != -1 else 1)
             )
 
         num_examples = (
@@ -409,7 +384,7 @@ class CLTrainer(Trainer):
         self.state.trial_name = self.hp_name(trial) if self.hp_name is not None else None
         self.state.trial_params = hp_params(trial) if trial is not None else None
         # This should be the same if the state has been saved but in case the training arguments changed, it's safer
-        # to set this after the load.
+        # to set this after the load
         self.state.max_steps = max_steps
         self.state.num_train_epochs = num_train_epochs
         self.state.is_local_process_zero = self.is_local_process_zero()
@@ -425,10 +400,10 @@ class CLTrainer(Trainer):
 
         self.control = self.callback_handler.on_train_begin(self.args, self.state, self.control)
 
-        # Skip the first epochs_trained epochs to get the random state of the dataloader at the right point.
+        # Skip the first epochs_trained epochs to get the random state of the dataloader at the right point
         if not self.args.ignore_data_skip:
             for epoch in range(epochs_trained):
-                # We just need to begin an iteration to create the randomization of the sampler.
+                # We just need to begin an iteration to create the randomization of the sampler
                 for _ in train_dataloader:
                     break
         for epoch in range(epochs_trained, num_train_epochs):
@@ -436,7 +411,7 @@ class CLTrainer(Trainer):
                 train_dataloader.sampler.set_epoch(epoch)
             epoch_iterator = train_dataloader
 
-            # Reset the past mems state at the beginning of each epoch if necessary.
+            # Reset the past mems state at the beginning of each epoch if necessary
             if self.args.past_index >= 0:
                 self._past = None
 
@@ -457,7 +432,7 @@ class CLTrainer(Trainer):
                     self.control = self.callback_handler.on_step_begin(self.args, self.state, self.control)
 
                 if ((step + 1) % self.args.gradient_accumulation_steps != 0) and self.args.local_rank != -1:
-                    # Avoid unnecessary DDP synchronization since there will be no backward pass on this example.
+                    # Avoid unnecessary DDP synchronization since there will be no backward pass on this example
                     with model.no_sync():
                         tr_loss += self.training_step(model, inputs)
                 else:
@@ -465,9 +440,9 @@ class CLTrainer(Trainer):
                 self._total_flos += self.floating_point_ops(inputs)
 
                 if (step + 1) % self.args.gradient_accumulation_steps == 0 or (
-                    # last step in epoch but step is always smaller than gradient_accumulation_steps
-                    steps_in_epoch <= self.args.gradient_accumulation_steps
-                    and (step + 1) == steps_in_epoch
+                        # last step in epoch but step is always smaller than gradient_accumulation_steps
+                        steps_in_epoch <= self.args.gradient_accumulation_steps
+                        and (step + 1) == steps_in_epoch
                 ):
                     # Gradient clipping
                     if self.args.max_grad_norm is not None and self.args.max_grad_norm > 0 and not self.deepspeed:
@@ -495,7 +470,7 @@ class CLTrainer(Trainer):
                         self.scaler.update()
                     else:
                         self.optimizer.step()
-                    
+
                     self.lr_scheduler.step()
 
                     model.zero_grad()
